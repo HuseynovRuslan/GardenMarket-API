@@ -1,6 +1,10 @@
 const express = require("express");
+const multer = require("multer");
 const { getDB } = require("../db/database");
 const router = express.Router();
+
+// Voice input: buffer the recorded clip in memory, forward to Groq Whisper.
+const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 function getSetting(key) {
   return getDB().prepare("SELECT value FROM settings WHERE key=?").get(key)
@@ -158,6 +162,40 @@ router.post("/recommend", (req, res) => {
   }
 
   res.json(dishes);
+});
+
+// POST /api/ai/transcribe — voice → text via Groq Whisper. Frontend records a
+// short clip (webm/opus) and posts it as multipart `audio`; we forward it to
+// Groq and return the transcript for the customer to review before sending.
+router.post("/transcribe", audioUpload.single("audio"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No audio uploaded" });
+  const language = (req.body.language || "").trim(); // e.g. 'az'; empty = auto-detect
+  try {
+    const baseUrl = process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
+    const model = process.env.GROQ_WHISPER_MODEL || "whisper-large-v3";
+    const form = new FormData();
+    form.append("file", new Blob([req.file.buffer], { type: req.file.mimetype || "audio/webm" }), req.file.originalname || "audio.webm");
+    form.append("model", model);
+    form.append("response_format", "json");
+    if (language) form.append("language", language);
+
+    const r = await fetch(`${baseUrl}/audio/transcriptions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      body: form,
+    });
+    if (!r.ok) {
+      const body = await r.text();
+      console.error("[ai/transcribe] Groq HTTP", r.status, body.slice(0, 200));
+      // Match the chat route's graceful degradation so the UI can fall back to typing.
+      return res.json({ text: "", offline: true });
+    }
+    const data = await r.json();
+    res.json({ text: (data.text || "").trim() });
+  } catch (err) {
+    console.error("[ai/transcribe] error:", err.message);
+    res.json({ text: "", offline: true });
+  }
 });
 
 module.exports = router;
