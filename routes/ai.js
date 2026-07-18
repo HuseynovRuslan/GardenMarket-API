@@ -43,27 +43,47 @@ function extractMentionedDishes(reply, dishes) {
   });
 }
 
+// Catalog lines with ids so the model can map a spoken/typed order to concrete
+// products. The id is used only inside the returned JSON `cart`, never shown to
+// the customer.
+function getCatalogForAI(dishes) {
+  return dishes
+    .map((d) => {
+      let name;
+      try { name = JSON.parse(d.name); } catch { name = { en: d.name }; }
+      const nm = name.az || name.en || Object.values(name)[0];
+      const unit = UNIT_LABEL[d.unit] || UNIT_LABEL.piece;
+      const oos = d.stock_qty != null && d.stock_qty <= 0 ? " [OUT OF STOCK]" : "";
+      return `#${d.id} ${nm} — ${d.price} AZN ${unit}${oos}`;
+    })
+    .join("\n");
+}
+
 router.post("/chat", async (req, res) => {
   const { message, language = "en", history = [] } = req.body;
   const allDishes = getAllDishes();
-  const menuContext = getMenuContext(allDishes);
+  const catalog = getCatalogForAI(allDishes);
 
-  const systemPrompt = `You are a friendly grocery store assistant at GardenMarket. Answer only about the products we stock, their prices, and shopping recommendations. Be concise and helpful. Respond in language: ${language}.
+  const systemPrompt = `You are the shopping assistant for GardenMarket, an organic grocery in Baku. The customer writes or speaks in language "${language}".
 
-Products:
-${menuContext}
+Respond with ONLY a JSON object, nothing else:
+{"reply": "<a short, friendly reply in ${language}, 1-3 sentences>", "cart": [{"id": <product id>, "qty": <number>}]}
 
-Rules:
-- Only answer questions about our products and shopping
-- Suggest products based on what the customer is cooking or looking for
-- If asked about price, unit, calories, or ingredients - answer precisely
-- Prices are per kg / each / per pack / per bunch exactly as listed above — never quote a per-kg price for an item sold each, or vice versa
-- Never claim an item is in stock if it is marked OUT OF STOCK above
-- Keep responses short (2-4 sentences max)
-- CRITICAL: You CANNOT add items to the cart or place orders. Never say "I added X to your cart" or anything implying you took an action.
-- When you mention a product we stock, it will automatically be shown to the customer with an "Add to cart" button below your message — you do NOT need to tell them to tap a card.
-- Never pretend to confirm or complete an order.
-- Never show internal product IDs (e.g. "ID:11") to the customer.`;
+Products (id — name — price/unit):
+${catalog}
+
+How to fill "cart":
+- Put every product the customer wants to buy/add, mapped to the ids above, with the quantity they said.
+- Quantities are in the product's own unit: "1.5 kq ət" → qty 1.5 for the meat item; "on yumurta" / "10 eggs" → qty 10. If no number is given, use 1.
+- If they only ask a question or want a recommendation, still put the relevant products in "cart" with qty 1 so they can add them easily.
+- If they ask for something we do NOT sell, mention it briefly in "reply" and leave it out of "cart".
+- Do NOT add items marked [OUT OF STOCK].
+- Only use ids that appear above. Never invent an id. If nothing matches, use "cart": [].
+
+Rules for "reply":
+- Warm and short. Confirm what you understood, e.g. "3 kq quzu əti və 10 yumurta hazırdır — səbətə əlavə edə bilərsiniz".
+- Never write id numbers in "reply".
+- Never claim you already added items or completed an order — the customer taps a button to add them.`;
 
   try {
     const baseUrl = process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
@@ -84,7 +104,7 @@ Rules:
         Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model, messages, stream: false }),
+      body: JSON.stringify({ model, messages, stream: false, response_format: { type: "json_object" } }),
     });
 
     if (!response.ok) {
@@ -95,10 +115,35 @@ Rules:
     }
 
     const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "Sorry, I could not process your request.";
-    const mentionedDishes = extractMentionedDishes(reply, allDishes);
+    const raw = data.choices?.[0]?.message?.content || "{}";
+    let reply = "";
+    let requested = [];
+    try {
+      const parsed = JSON.parse(raw);
+      reply = typeof parsed.reply === "string" ? parsed.reply : "";
+      requested = Array.isArray(parsed.cart) ? parsed.cart : [];
+    } catch {
+      reply = raw; // model returned plain text instead of JSON — show it as-is
+    }
 
-    res.json({ reply, dishes: mentionedDishes });
+    // Validate the requested items against the real catalog before returning.
+    const byId = new Map(allDishes.map((d) => [d.id, d]));
+    const seen = new Set();
+    const cart = [];
+    for (const it of requested) {
+      const id = Number(it?.id);
+      const d = byId.get(id);
+      if (!d || seen.has(id)) continue;
+      if (d.stock_qty != null && d.stock_qty <= 0) continue; // never add out-of-stock
+      let qty = Number(it?.qty);
+      if (!Number.isFinite(qty) || qty <= 0) qty = 1;
+      qty = Math.round(qty * 100) / 100; // cap at 2 decimals
+      seen.add(id);
+      cart.push({ ...d, qty });
+    }
+    if (!reply) reply = cart.length ? "Hazırdır — səbətə əlavə edə bilərsiniz." : "Sizə necə kömək edə bilərəm?";
+
+    res.json({ reply, cart });
   } catch (err) {
     const msg = err.message || "";
     const offlinePatterns = [
@@ -122,6 +167,7 @@ Rules:
         reply:
           "AI assistant is currently unavailable. Please ask the staff for recommendations.",
         offline: true,
+        cart: [],
       });
     } else {
       console.error("[ai/chat] error:", msg);
