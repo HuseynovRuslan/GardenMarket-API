@@ -1,0 +1,29 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gardenmarket-api
+    container_name: gardenmarket-api
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3100}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Must point inside the db-data volume, otherwise the SQLite file lives in
+      # the container layer and every redeploy silently wipes orders and edits.
+      DB_PATH: /data/market.db
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
+      CLOUDINARY_FOLDER: ${CLOUDINARY_FOLDER:-gardenmarket}
+    volumes:
+      - db-data:/data          # SQLite database (persisted)
+      - ./uploads:/app/uploads # product photos when Cloudinary is unconfigured
+
+volumes:
+  db-data:

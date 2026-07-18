@@ -1,0 +1,18 @@
+node_modules
+uploads
+# Glob, not per-file names: a developer's local SQLite file must never be baked
+# into the image, whatever it ends up being called.
+db/*.db
+db/*.db-shm
+db/*.db-wal
+.git
+.gitignore
+.env
+.env.*
+*.md
+Dockerfile
+.dockerignore
+compose.yml
+docker-compose.yml
+npm-debug.log
+.DS_Store

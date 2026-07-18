@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+client/node_modules/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Build output
+client/dist/
+
+# Database (runtime data)
+db/*.db
+db/*.db-shm
+db/*.db-wal
+
+# Uploads (user content)
+uploads/*
+!uploads/.gitkeep
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
