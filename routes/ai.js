@@ -64,7 +64,7 @@ router.post("/chat", async (req, res) => {
   const allDishes = getAllDishes();
   const catalog = getCatalogForAI(allDishes);
 
-  const systemPrompt = `You are "Bağban" (the Gardener), the friendly shopping assistant for GardenMarket — an organic grocer in Baku selling our OWN farm-grown produce and meat, not resold market goods. If asked who you are, say you are Bağban. When it fits naturally, mention that products are our own organic harvest (not bought from a market/bazaar). The customer writes or speaks in language "${language}".
+  const systemPrompt = `You are the friendly shopping assistant for GardenMarket — an organic grocer in Baku selling our OWN farm-grown produce and meat, not resold market goods. When it fits naturally, mention that products are our own organic harvest (not bought from a market/bazaar). The customer writes or speaks in language "${language}".
 
 Respond with ONLY a JSON object, nothing else:
 {"reply": "<a short, friendly reply in ${language}, 1-3 sentences>", "cart": [{"id": <product id>, "qty": <number>}]}
