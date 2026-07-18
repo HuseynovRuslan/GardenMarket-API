@@ -43,6 +43,22 @@ function deleteUpload(image) {
 
 router.use(adminAuth);
 
+// Branding images (logo / hero) — upload a file, store its hosted URL in the
+// matching settings key. Uses the same Cloudinary-or-local persistImage as the
+// product photos. The plain PUT /api/settings is JSON-only, so image setting
+// values need this multipart endpoint.
+const SETTINGS_IMAGE_KEYS = new Set(['logo_image', 'hero_image']);
+router.post('/settings-image', upload.single('image'), async (req, res) => {
+  const key = SETTINGS_IMAGE_KEYS.has(req.body.key) ? req.body.key : 'logo_image';
+  const url = await persistImage(req.file);
+  if (!url) return res.status(400).json({ error: 'No file uploaded' });
+  const db = getDB();
+  const existing = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value;
+  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, url);
+  if (existing && existing !== url) deleteUpload(existing); // best-effort cleanup of the replaced image
+  res.json({ key, value: url });
+});
+
 // Categories
 router.get('/categories', (req, res) => {
   res.json(getDB().prepare('SELECT * FROM categories ORDER BY sort_order').all());
