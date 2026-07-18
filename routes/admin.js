@@ -239,12 +239,52 @@ router.delete('/orders/:id', (req, res) => {
   getDB().prepare('DELETE FROM orders WHERE id=?').run(req.params.id);
   res.json({ ok: true });
 });
+// Bulk delete: DELETE /api/admin/orders  { ids: [1,2,3] }. Distinct route from
+// /orders/:id above (no id segment), so both coexist without conflict.
+router.delete('/orders', (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Number.isInteger) : [];
+  if (!ids.length) return res.status(400).json({ error: 'No ids provided' });
+  const placeholders = ids.map(() => '?').join(',');
+  const result = getDB().prepare(`DELETE FROM orders WHERE id IN (${placeholders})`).run(...ids);
+  res.json({ ok: true, deleted: result.changes });
+});
 
 // CSV export (opens in Excel). `report=orders` (one row per order) or
 // `report=products` (what we sold: qty + revenue per product). Honors the same
-// date/status filters as the orders list. A UTF-8 BOM keeps Azerbaijani letters
-// correct in Excel; items inside a cell are separated by " / " to avoid clashing
-// with the comma delimiter.
+// date/status filters as the orders list, plus `lang` (az|ru|en|tr, matching the
+// admin panel's language switcher) for headers and status/fulfillment labels.
+// A UTF-8 BOM keeps non-ASCII letters correct in Excel; items inside a cell are
+// separated by " / " to avoid clashing with the comma delimiter.
+const EXPORT_I18N = {
+  az: {
+    orderHeaders: ['№', 'Tarix', 'Növ', 'Ünvan / Telefon', 'Məhsullar', 'Cəmi', 'Valyuta', 'Status'],
+    productHeaders: ['Məhsul', 'Say', 'Gəlir'],
+    pickup: 'Özü götürür', delivery: 'Çatdırılma',
+    status: { new: 'Yeni', picking: 'Yığılır', ready: 'Hazır', done: 'Verildi', cancelled: 'Ləğv edildi' },
+    filenames: { orders: 'sifarisler', products: 'satilanlar' },
+  },
+  ru: {
+    orderHeaders: ['№', 'Дата', 'Тип', 'Адрес / Телефон', 'Товары', 'Итого', 'Валюта', 'Статус'],
+    productHeaders: ['Товар', 'Кол-во', 'Выручка'],
+    pickup: 'Самовывоз', delivery: 'Доставка',
+    status: { new: 'Новый', picking: 'Собирается', ready: 'Готов', done: 'Выдан', cancelled: 'Отменён' },
+    filenames: { orders: 'zakazy', products: 'prodazhi' },
+  },
+  en: {
+    orderHeaders: ['No', 'Date', 'Type', 'Address / Phone', 'Products', 'Total', 'Currency', 'Status'],
+    productHeaders: ['Product', 'Qty', 'Revenue'],
+    pickup: 'Pickup', delivery: 'Delivery',
+    status: { new: 'New', picking: 'Picking', ready: 'Ready', done: 'Done', cancelled: 'Cancelled' },
+    filenames: { orders: 'orders', products: 'sold-products' },
+  },
+  tr: {
+    orderHeaders: ['No', 'Tarih', 'Tür', 'Adres / Telefon', 'Ürünler', 'Toplam', 'Para Birimi', 'Durum'],
+    productHeaders: ['Ürün', 'Adet', 'Gelir'],
+    pickup: 'Mağazadan alım', delivery: 'Teslimat',
+    status: { new: 'Yeni', picking: 'Toplanıyor', ready: 'Hazır', done: 'Teslim edildi', cancelled: 'İptal edildi' },
+    filenames: { orders: 'siparisler', products: 'satislar' },
+  },
+};
 function csvCell(v) {
   const s = v == null ? '' : String(v);
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
@@ -257,6 +297,7 @@ router.get('/orders/export', (req, res) => {
   const { sql, params } = orderFilters(req.query);
   const orders = db.prepare(`SELECT * FROM orders ${sql} ORDER BY created_at DESC`).all(...params);
   const parseItems = (o) => { try { return JSON.parse(o.items) || []; } catch { return []; } };
+  const L = EXPORT_I18N[req.query.lang] || EXPORT_I18N.az;
 
   let filename, csv;
   if (req.query.report === 'products') {
@@ -273,17 +314,19 @@ router.get('/orders/export', (req, res) => {
     }
     const rows = [...agg.values()].sort((a, b) => b.revenue - a.revenue)
       .map((r) => [r.name, r.qty, r.revenue.toFixed(2)]);
-    csv = toCsv(['Məhsul', 'Say', 'Gəlir'], rows);
-    filename = 'satilanlar';
+    csv = toCsv(L.productHeaders, rows);
+    filename = L.filenames.products;
   } else {
     const rows = orders.map((o) => {
       const items = parseItems(o).map((it) => `${it.name}${it.size ? ` (${it.size})` : ''} ×${it.qty}`).join(' / ');
-      const contact = o.fulfillment_type === 'delivery' ? (o.delivery_address || '') : 'Götürmə';
-      return [o.id, (o.created_at || '').replace('T', ' ').slice(0, 16), o.fulfillment_type,
-        [contact, o.customer_phone].filter(Boolean).join(' '), items, o.total, o.currency, o.status];
+      const typeLabel = o.fulfillment_type === 'delivery' ? L.delivery : L.pickup;
+      const contact = o.fulfillment_type === 'delivery' ? (o.delivery_address || '') : '';
+      const statusLabel = L.status[o.status] || o.status;
+      return [o.id, (o.created_at || '').replace('T', ' ').slice(0, 16), typeLabel,
+        [contact, o.customer_phone].filter(Boolean).join(' '), items, o.total, o.currency, statusLabel];
     });
-    csv = toCsv(['№', 'Tarix', 'Növ', 'Ünvan / Telefon', 'Məhsullar', 'Cəmi', 'Valyuta', 'Status'], rows);
-    filename = 'sifarisler';
+    csv = toCsv(L.orderHeaders, rows);
+    filename = L.filenames.orders;
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
