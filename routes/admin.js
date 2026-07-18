@@ -235,5 +235,59 @@ router.put('/orders/:id/status', (req, res) => {
   getDB().prepare('UPDATE orders SET status=? WHERE id=?').run(req.body.status, req.params.id);
   res.json({ ok: true });
 });
+router.delete('/orders/:id', (req, res) => {
+  getDB().prepare('DELETE FROM orders WHERE id=?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// CSV export (opens in Excel). `report=orders` (one row per order) or
+// `report=products` (what we sold: qty + revenue per product). Honors the same
+// date/status filters as the orders list. A UTF-8 BOM keeps Azerbaijani letters
+// correct in Excel; items inside a cell are separated by " / " to avoid clashing
+// with the comma delimiter.
+function csvCell(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function toCsv(header, rows) {
+  return [header, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n');
+}
+router.get('/orders/export', (req, res) => {
+  const db = getDB();
+  const { sql, params } = orderFilters(req.query);
+  const orders = db.prepare(`SELECT * FROM orders ${sql} ORDER BY created_at DESC`).all(...params);
+  const parseItems = (o) => { try { return JSON.parse(o.items) || []; } catch { return []; } };
+
+  let filename, csv;
+  if (req.query.report === 'products') {
+    const agg = new Map(); // key -> { name, qty, revenue }
+    for (const o of orders) {
+      for (const it of parseItems(o)) {
+        const key = it.id != null ? `id:${it.id}` : `n:${it.name}`;
+        const cur = agg.get(key) || { name: it.name || '?', qty: 0, revenue: 0 };
+        const q = Number(it.qty) || 0;
+        cur.qty += q;
+        cur.revenue += q * (Number(it.price) || 0);
+        agg.set(key, cur);
+      }
+    }
+    const rows = [...agg.values()].sort((a, b) => b.revenue - a.revenue)
+      .map((r) => [r.name, r.qty, r.revenue.toFixed(2)]);
+    csv = toCsv(['Məhsul', 'Say', 'Gəlir'], rows);
+    filename = 'satilanlar';
+  } else {
+    const rows = orders.map((o) => {
+      const items = parseItems(o).map((it) => `${it.name}${it.size ? ` (${it.size})` : ''} ×${it.qty}`).join(' / ');
+      const contact = o.fulfillment_type === 'delivery' ? (o.delivery_address || '') : 'Götürmə';
+      return [o.id, (o.created_at || '').replace('T', ' ').slice(0, 16), o.fulfillment_type,
+        [contact, o.customer_phone].filter(Boolean).join(' '), items, o.total, o.currency, o.status];
+    });
+    csv = toCsv(['№', 'Tarix', 'Növ', 'Ünvan / Telefon', 'Məhsullar', 'Cəmi', 'Valyuta', 'Status'], rows);
+    filename = 'sifarisler';
+  }
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
+  res.send('﻿' + csv); // BOM so Excel reads UTF-8
+});
 
 module.exports = router;
