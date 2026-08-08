@@ -8,7 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json ./
-RUN npm install --omit=dev --build-from-source
+# --build-from-source is only needed for better-sqlite3. Scoping it to that
+# package keeps sharp on its prebuilt platform binaries (@img/sharp-linux-*),
+# which would otherwise try to compile libvips from source.
+RUN npm install --omit=dev \
+    && npm rebuild better-sqlite3 --build-from-source
 
 # ---- runtime: slim image with only what the API needs ----
 FROM node:22-bookworm-slim AS runtime

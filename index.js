@@ -30,7 +30,13 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 // Local fallback for product photos when Cloudinary is unconfigured (see cloudinary.js).
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Upload names carry a timestamp and a replaced photo gets a new name, so a stored
+// file never changes content — cache it hard instead of revalidating on every
+// catalogue view (express.static defaults to max-age=0).
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  maxAge: '365d',
+  immutable: true,
+}));
 
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));

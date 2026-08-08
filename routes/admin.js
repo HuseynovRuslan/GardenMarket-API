@@ -2,6 +2,14 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+// Optional: if the native binary is unavailable on this platform, uploads still
+// work — they just skip optimisation instead of taking /api/admin/* down.
+let sharp = null;
+try {
+  sharp = require('sharp');
+} catch (err) {
+  console.warn('[upload] sharp unavailable, storing images as-is:', err.message);
+}
 const { getDB, UNITS } = require('../db/database');
 const { adminAuth } = require('../middleware/auth');
 const cloudinary = require('../cloudinary');
@@ -13,22 +21,59 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 
 const uploadsDir = path.join(__dirname, '../uploads');
 
+// Phone cameras and design exports produce multi-megabyte PNGs; a product card
+// renders them at ~180-400px. Downscale to a sane max edge and re-encode as
+// JPEG so a catalogue page costs kilobytes, not megabytes. Returns the original
+// buffer unchanged if the file isn't a decodable image (sharp throws) — the
+// caller still stores it rather than losing the admin's upload.
+const MAX_EDGE = 1000;
+async function optimizeImage(buffer, originalname) {
+  if (!sharp) return { buffer, ext: null };
+  try {
+    const img = sharp(buffer, { failOn: 'none' }).rotate(); // honour EXIF orientation
+    const meta = await img.metadata();
+    // Preserve transparency (logos/PNG cut-outs) — flattening them onto white
+    // would wreck a transparent logo; those stay PNG, just resized.
+    const keepPng = meta.hasAlpha === true;
+    const pipeline = img.resize({
+      width: MAX_EDGE,
+      height: MAX_EDGE,
+      fit: 'inside',
+      withoutEnlargement: true,
+    });
+    const out = keepPng
+      ? await pipeline.png({ compressionLevel: 9, palette: true }).toBuffer()
+      : await pipeline.jpeg({ quality: 82, mozjpeg: true }).toBuffer();
+    // A tiny already-optimised file can come out bigger — keep the smaller one.
+    if (out.length >= buffer.length) return { buffer, ext: null };
+    return { buffer: out, ext: keepPng ? '.png' : '.jpg' };
+  } catch (err) {
+    console.error('[upload] optimize skipped for', originalname, '-', err.message);
+    return { buffer, ext: null };
+  }
+}
+
 // Persist an uploaded file and return the URL stored in the DB.
 // Prefers Cloudinary (folder "gardenmarket"); falls back to local /uploads on failure.
 async function persistImage(file) {
   if (!file) return null;
+  const { buffer, ext } = await optimizeImage(file.buffer, file.originalname);
+  const baseName = file.originalname.replace(/\s/g, '_');
+  // When re-encoded, swap the extension so the file name matches its bytes.
+  const filename = ext ? baseName.replace(/\.[^.]+$/, '') + ext : baseName;
+
   if (cloudinary.isConfigured) {
     try {
-      const publicId = file.originalname.replace(/\.[^.]+$/, '').replace(/\s/g, '_') + '-' + Date.now();
-      return await cloudinary.uploadImage(file.buffer, publicId);
+      const publicId = filename.replace(/\.[^.]+$/, '') + '-' + Date.now();
+      return await cloudinary.uploadImage(buffer, publicId);
     } catch (err) {
       console.error('Cloudinary upload failed, falling back to local disk:', err.message);
     }
   }
   if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-  const filename = `${Date.now()}-${file.originalname.replace(/\s/g, '_')}`;
-  fs.writeFileSync(path.join(uploadsDir, filename), file.buffer);
-  return `/uploads/${filename}`;
+  const stored = `${Date.now()}-${filename}`;
+  fs.writeFileSync(path.join(uploadsDir, stored), buffer);
+  return `/uploads/${stored}`;
 }
 
 // Remove a previously stored image (local /uploads file or Cloudinary asset).
