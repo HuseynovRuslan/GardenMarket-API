@@ -26,7 +26,10 @@ const uploadsDir = path.join(__dirname, '../uploads');
 // JPEG so a catalogue page costs kilobytes, not megabytes. Returns the original
 // buffer unchanged if the file isn't a decodable image (sharp throws) — the
 // caller still stores it rather than losing the admin's upload.
-const MAX_EDGE = 1000;
+// 700px covers every place a photo is shown: the widest card is ~239 CSS px
+// (4-up on a 1024px grid) and the modal is 448 CSS px, so this still has
+// headroom on a 2x display. Going to 1000px only doubled the bytes.
+const MAX_EDGE = 700;
 async function optimizeImage(buffer, originalname) {
   if (!sharp) return { buffer, ext: null };
   try {
