@@ -79,9 +79,27 @@ async function persistImage(file) {
   return `/uploads/${stored}`;
 }
 
-// Remove a previously stored image (local /uploads file or Cloudinary asset).
+// Is this image URL still used anywhere? A product's variant rows (`sizes`)
+// can carry their own photo — e.g. one "Sunflower oil" product whose thyme /
+// dill / rosemary variants each show their own bottle — so the same file can be
+// referenced from several places. Call this AFTER the row change has been
+// written, so it reflects the state the file would be orphaned in.
+function isImageReferenced(image) {
+  const db = getDB();
+  const like = `%${JSON.stringify(image).slice(1, -1)}%`; // as it appears inside the sizes JSON
+  return !!(
+    db.prepare('SELECT 1 FROM dishes WHERE image = ? OR sizes LIKE ? LIMIT 1').get(image, like) ||
+    db.prepare('SELECT 1 FROM promotions WHERE image = ? LIMIT 1').get(image) ||
+    db.prepare('SELECT 1 FROM categories WHERE icon_url = ? LIMIT 1').get(image) ||
+    db.prepare('SELECT 1 FROM settings WHERE value = ? LIMIT 1').get(image)
+  );
+}
+
+// Remove a previously stored image (local /uploads file or Cloudinary asset) —
+// unless another row still points at it.
 function deleteUpload(image) {
   if (!image) return;
+  if (isImageReferenced(image)) return;
   if (image.startsWith('/uploads/')) {
     fs.promises.unlink(path.join(__dirname, '..', image)).catch(() => {});
   } else if (image.includes('res.cloudinary.com')) {
@@ -128,9 +146,10 @@ router.put('/categories/:id', upload.single('iconFile'), async (req, res) => {
   if (req.file) icon_url = await persistImage(req.file);
   else if (req.body.icon_url !== undefined) icon_url = req.body.icon_url || null;
   else icon_url = existing?.icon_url || null;
-  if (existing?.icon_url && existing.icon_url !== icon_url) deleteUpload(existing.icon_url);
   db.prepare('UPDATE categories SET name=?, icon=?, icon_type=?, icon_key=?, icon_url=?, sort_order=?, is_active=? WHERE id=?')
     .run(name, icon, icon_type || 'svg', icon_key || null, icon_url, sort_order, is_active, req.params.id);
+  // after the write, so the reference check doesn't see this row's old value
+  if (existing?.icon_url && existing.icon_url !== icon_url) deleteUpload(existing.icon_url);
   res.json({ ok: true });
 });
 router.delete('/categories/:id', (req, res) => {
@@ -147,6 +166,39 @@ router.delete('/categories/:id', (req, res) => {
 // not 0 ("out of stock"), and an unknown unit must not silently persist.
 function normalizeUnit(value) {
   return UNITS.includes(value) ? value : 'piece';
+}
+// `sizes` is a JSON array of variants. Each row is { label, price, image? }:
+// `label` is either a plain string ("1 kq") or a per-language object
+// ({ az: 'Kəklikotulu', en: 'Thyme', ... }) for named variants (flavours);
+// `image` is an optional photo for that variant. Drop rows the storefront
+// couldn't render and strip anything else so junk never reaches the DB.
+function normalizeSizes(raw) {
+  let arr;
+  try { arr = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { arr = null; }
+  if (!Array.isArray(arr)) return '[]';
+  const out = [];
+  for (const s of arr) {
+    if (!s || typeof s !== 'object') continue;
+    let label = s.label;
+    if (typeof label === 'string') {
+      label = label.trim();
+    } else if (label && typeof label === 'object') {
+      label = Object.fromEntries(
+        Object.entries(label)
+          .filter(([k, v]) => typeof v === 'string' && v.trim() && /^[a-z]{2}$/.test(k))
+          .map(([k, v]) => [k, v.trim()]),
+      );
+      if (!Object.keys(label).length) label = '';
+    } else {
+      label = '';
+    }
+    const price = Number(s.price);
+    if (!label || !Number.isFinite(price)) continue;
+    const row = { label, price };
+    if (typeof s.image === 'string' && s.image.trim()) row.image = s.image.trim();
+    out.push(row);
+  }
+  return JSON.stringify(out);
 }
 function normalizeStock(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -170,7 +222,7 @@ router.post('/dishes', upload.single('image'), async (req, res) => {
   const result = db.prepare(`
     INSERT INTO dishes (category_id, name, description, ingredients, price, old_price, unit, stock_qty, sku, weight, calories, protein, fat, carbs, allergens, sizes, image, is_available, is_featured, is_vegetarian, is_vegan, sort_order)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(d.category_id, d.name, d.description || null, d.ingredients || null, d.price, d.old_price || null, normalizeUnit(d.unit), normalizeStock(d.stock_qty), d.sku || null, d.weight || null, d.calories || null, d.protein || null, d.fat || null, d.carbs || null, d.allergens || '[]', d.sizes || '[]', image, d.is_available ?? 1, d.is_featured ?? 0, d.is_vegetarian ?? 0, d.is_vegan ?? 0, d.sort_order ?? 0);
+  `).run(d.category_id, d.name, d.description || null, d.ingredients || null, d.price, d.old_price || null, normalizeUnit(d.unit), normalizeStock(d.stock_qty), d.sku || null, d.weight || null, d.calories || null, d.protein || null, d.fat || null, d.carbs || null, d.allergens || '[]', normalizeSizes(d.sizes), image, d.is_available ?? 1, d.is_featured ?? 0, d.is_vegetarian ?? 0, d.is_vegan ?? 0, d.sort_order ?? 0);
   res.json({ id: result.lastInsertRowid });
 });
 router.put('/dishes/:id', upload.single('image'), async (req, res) => {
@@ -182,18 +234,23 @@ router.put('/dishes/:id', upload.single('image'), async (req, res) => {
   if (req.file) image = await persistImage(req.file);
   else if (d.image !== undefined) image = d.image || null;
   else image = existing?.image || null;
-  // delete the old file when it is being replaced or removed
-  if (existing?.image && existing.image !== image) deleteUpload(existing.image);
   db.prepare(`
     UPDATE dishes SET category_id=?, name=?, description=?, ingredients=?, price=?, old_price=?, unit=?, stock_qty=?, sku=?, weight=?, calories=?, protein=?, fat=?, carbs=?, allergens=?, sizes=?, image=?, is_available=?, is_featured=?, is_vegetarian=?, is_vegan=?, sort_order=? WHERE id=?
-  `).run(d.category_id, d.name, d.description || null, d.ingredients || null, d.price, d.old_price || null, normalizeUnit(d.unit), normalizeStock(d.stock_qty), d.sku || null, d.weight || null, d.calories || null, d.protein || null, d.fat || null, d.carbs || null, d.allergens || '[]', d.sizes || '[]', image, d.is_available ?? 1, d.is_featured ?? 0, d.is_vegetarian ?? 0, d.is_vegan ?? 0, d.sort_order ?? 0, req.params.id);
+  `).run(d.category_id, d.name, d.description || null, d.ingredients || null, d.price, d.old_price || null, normalizeUnit(d.unit), normalizeStock(d.stock_qty), d.sku || null, d.weight || null, d.calories || null, d.protein || null, d.fat || null, d.carbs || null, d.allergens || '[]', normalizeSizes(d.sizes), image, d.is_available ?? 1, d.is_featured ?? 0, d.is_vegetarian ?? 0, d.is_vegan ?? 0, d.sort_order ?? 0, req.params.id);
+  // Delete the replaced/removed file only after the row is written: a variant
+  // of this or another product may still use it (see isImageReferenced).
+  if (existing?.image && existing.image !== image) deleteUpload(existing.image);
   res.json({ ok: true });
 });
 router.delete('/dishes/:id', (req, res) => {
   const db = getDB();
-  const existing = db.prepare('SELECT image FROM dishes WHERE id=?').get(req.params.id);
+  const existing = db.prepare('SELECT image, sizes FROM dishes WHERE id=?').get(req.params.id);
   db.prepare('DELETE FROM dishes WHERE id=?').run(req.params.id);
   if (existing?.image) deleteUpload(existing.image);
+  // Variant photos go with the product too (unless shared).
+  try {
+    for (const s of JSON.parse(existing?.sizes || '[]')) if (s?.image) deleteUpload(s.image);
+  } catch { /* malformed sizes — nothing to clean */ }
   res.json({ ok: true });
 });
 

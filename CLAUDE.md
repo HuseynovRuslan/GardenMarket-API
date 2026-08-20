@@ -47,8 +47,8 @@ middleware/auth.js  ← adminAuth: checks x-admin-password against the admin_pas
 - `unit` — `kg` | `piece` | `pack` | `bunch` (see the `UNITS` export). Drives price rendering ("2.20 ₼/kq" vs plain "2.40 ₼") and what a quantity step means.
 - `stock_qty` — `NULL` means *not tracked* (always available); `0` means *out of stock*; `>0` is the count. `normalizeStock()` in `routes/admin.js` enforces this: an empty form field stores `NULL`, not `0`.
 - `sku` — free-text article code / barcode.
-- `sizes` — inherited JSON `[{label, price}]`, repurposed as **pack variants** (e.g. rice `1 kq` / `5 kq`). `price` mirrors the smallest pack and is the card/fallback price.
-Admin writes go through `normalizeUnit()` (unknown unit → `piece`) and `normalizeStock()`.
+- `sizes` — inherited JSON `[{label, price, image?}]`, repurposed as **variants**. `label` is a plain string for pack sizes (rice `1 kq` / `5 kq`) or a `{en, ru, az, tr}` object for **named variants** (the cold-pressed oils: one "Sunflower oil" product with `Sadə / Kəklikotulu / Şüyüdlü …` flavours). `image` is an optional per-variant photo, shown when that variant is selected. `price` mirrors the cheapest variant and is the card/fallback price. `normalizeSizes()` in `routes/admin.js` sanitises the array on write.
+Admin writes go through `normalizeUnit()` (unknown unit → `piece`), `normalizeStock()` and `normalizeSizes()`.
 
 **Multilingual content**: All product names/descriptions/ingredients are JSON strings `{en, ru, az, tr}` in SQLite. Frontend resolves via `tl()`. `ingredients` is a JSON array per language and is `NULL` for raw produce.
 
@@ -58,13 +58,13 @@ Admin writes go through `normalizeUnit()` (unknown unit → `piece`) and `normal
 
 **Category icons**: `categories.icon_key` names a built-in SVG rendered by the React app (`vegetables`, `fruit`, `meat`, `dairy`, `herbs`, `bakery`, `pantry`). The seed sets these; they must match the `ICON_OPTIONS` keys in `GardenMarket-React/src/categoryIcons.jsx`. Legacy emoji lives in `categories.icon` as a fallback.
 
-**AI chat**: `POST /api/ai/chat` calls Groq's OpenAI-compatible Chat Completions API via native `fetch`. The system prompt is a **grocery-store assistant** (`routes/ai.js`) — it lists each product with its per-unit price and an OUT OF STOCK marker, and is instructed never to quote a per-kg price for a per-piece item. Returns `{ offline: true }` gracefully on auth/quota/network failure. `extractMentionedDishes()` scans the reply for product names (all languages) and returns matching rows so the frontend can show add-to-cart cards.
+**AI chat**: `POST /api/ai/chat` calls Groq's OpenAI-compatible Chat Completions API via native `fetch`. The system prompt is a **grocery-store assistant** (`routes/ai.js`) — it lists each product with its per-unit price and an OUT OF STOCK marker, and is instructed never to quote a per-kg price for a per-piece item. Returns `{ offline: true }` gracefully on auth/quota/network failure. `extractMentionedDishes()` scans the reply for product names (all languages) and returns matching rows so the frontend can show add-to-cart cards. The chat catalog lists each product's variants; the model may return `{id, qty, variant}` and the route resolves `variant` (any language, exact match) to the `sizes` row, returned as `variant` on the cart item.
 
 **Admin auth**: All `/api/admin/*` and `PUT /api/settings` require an `x-admin-password` header matching the `admin_password` setting (default `admin123`).
 
 **QR code**: `POST /api/settings/qrcode` builds a QR pointing at `menu_url` + `/gardenmarket` (the `STORE_SLUG`) — e.g. `https://menyuqr.com/gardenmarket`. Unlike the café there is **no table parameter** — one QR opens the store.
 
-**Images (Cloudinary)**: `cloudinary.js` uploads to the `gardenmarket` folder when configured; `routes/admin.js` `persistImage()` falls back to writing local `/uploads` otherwise. The DB stores the full URL either way, and the frontend uses `src={product.image}` directly.
+**Images (Cloudinary)**: `cloudinary.js` uploads to the `gardenmarket` folder when configured; `routes/admin.js` `persistImage()` falls back to writing local `/uploads` otherwise. The DB stores the full URL either way, and the frontend uses `src={product.image}` directly. `deleteUpload()` is **reference-aware** (`isImageReferenced()`): a file is only removed when no product image, variant (`sizes[].image`), promotion, category icon or setting still points at it — so deleting a product whose photo was moved into another product's variant keeps the file. Always write the row first, then call `deleteUpload()` on the old URL.
 
 **WhatsApp number**: Stored in the `whatsapp_number` setting and editable from the admin panel (unlike the café fork, where it was locked).
 

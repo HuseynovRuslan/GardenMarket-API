@@ -17,6 +17,30 @@ function getAllDishes() {
     .all();
 }
 
+// Variant rows on a product (`sizes`): { label, price, image? } where label is a
+// plain string or a per-language object. Named variants are how one "Sunflower
+// oil" product offers thyme / dill / rosemary flavours.
+function dishVariants(d) {
+  try {
+    const arr = JSON.parse(d.sizes || "[]");
+    return Array.isArray(arr) ? arr.filter((s) => s && s.label != null) : [];
+  } catch {
+    return [];
+  }
+}
+function variantLabel(s, lang = "az") {
+  const l = s.label;
+  if (typeof l === "string") return l;
+  return l?.[lang] || l?.az || l?.en || Object.values(l || {})[0] || "";
+}
+function variantMatches(s, text) {
+  const q = String(text || "").trim().toLowerCase();
+  if (!q) return false;
+  const l = s.label;
+  const names = typeof l === "string" ? [l] : Object.values(l || {});
+  return names.some((n) => typeof n === "string" && n.toLowerCase() === q);
+}
+
 const UNIT_LABEL = { kg: "per kg", piece: "each", pack: "per pack", bunch: "per bunch" };
 
 function getMenuContext(dishes) {
@@ -27,7 +51,9 @@ function getMenuContext(dishes) {
       const nameEn = name.en || name.az || Object.values(name)[0];
       const unit = UNIT_LABEL[d.unit] || UNIT_LABEL.piece;
       const stock = d.stock_qty == null ? "" : d.stock_qty > 0 ? "" : ", OUT OF STOCK";
-      return `- ${nameEn}: ${d.price} AZN ${unit}${d.calories ? `, ${d.calories} kcal/100g` : ""}${d.is_vegan ? ", vegan" : ""}${stock}`;
+      const variants = dishVariants(d).map((s) => variantLabel(s, "en")).filter(Boolean);
+      const vs = variants.length ? `, variants: ${variants.join(" / ")}` : "";
+      return `- ${nameEn}: ${d.price} AZN ${unit}${d.calories ? `, ${d.calories} kcal/100g` : ""}${d.is_vegan ? ", vegan" : ""}${vs}${stock}`;
     })
     .join("\n");
 }
@@ -37,8 +63,11 @@ function extractMentionedDishes(reply, dishes) {
   return dishes.filter((d) => {
     let names;
     try { names = JSON.parse(d.name); } catch { names = { en: d.name }; }
-    return Object.values(names).some((n) =>
-      n && replyLower.includes(n.toLowerCase())
+    const variantNames = dishVariants(d).flatMap((s) =>
+      typeof s.label === "string" ? [s.label] : Object.values(s.label || {})
+    );
+    return [...Object.values(names), ...variantNames].some((n) =>
+      typeof n === "string" && n && replyLower.includes(n.toLowerCase())
     );
   });
 }
@@ -54,7 +83,13 @@ function getCatalogForAI(dishes) {
       const nm = name.az || name.en || Object.values(name)[0];
       const unit = UNIT_LABEL[d.unit] || UNIT_LABEL.piece;
       const oos = d.stock_qty != null && d.stock_qty <= 0 ? " [OUT OF STOCK]" : "";
-      return `#${d.id} ${nm} — ${d.price} AZN ${unit}${oos}`;
+      const variants = dishVariants(d);
+      if (!variants.length) return `#${d.id} ${nm} — ${d.price} AZN ${unit}${oos}`;
+      const samePrice = variants.every((s) => Number(s.price) === Number(variants[0].price));
+      const list = variants
+        .map((s) => (samePrice ? variantLabel(s) : `${variantLabel(s)} ${s.price} AZN`))
+        .join(" / ");
+      return `#${d.id} ${nm} — ${samePrice ? `${variants[0].price} AZN ${unit}` : "price by variant"}${oos}; variants: ${list}`;
     })
     .join("\n");
 }
@@ -67,7 +102,7 @@ router.post("/chat", async (req, res) => {
   const systemPrompt = `You are the friendly shopping assistant for GardenMarket — an organic grocer in Baku selling our OWN farm-grown produce and meat, not resold market goods. When it fits naturally, mention that products are our own organic harvest (not bought from a market/bazaar). The customer writes or speaks in language "${language}".
 
 Respond with ONLY a JSON object, nothing else:
-{"reply": "<a short, friendly reply in ${language}, 1-3 sentences>", "cart": [{"id": <product id>, "qty": <number>}]}
+{"reply": "<a short, friendly reply in ${language}, 1-3 sentences>", "cart": [{"id": <product id>, "qty": <number>, "variant": "<variant name or omit>"}]}
 
 Products (id — name — price/unit):
 ${catalog}
@@ -77,6 +112,7 @@ How to fill "cart":
 - Quantities are in the product's own unit: "1.5 kq ət" → qty 1.5 for the meat item; "on yumurta" / "10 eggs" → qty 10. If no number is given, use 1.
 - If they only ask a question or want a recommendation, still put the relevant products in "cart" with qty 1 so they can add them easily.
 - If they ask for something we do NOT sell, mention it briefly in "reply" and leave it out of "cart".
+- Some products come in variants (listed after "variants:"). If the customer names one (e.g. "kəklikotulu günəbaxan yağı"), put that variant's name, exactly as listed, in "variant". If they don't say which, omit "variant" and ask them in "reply" which one they'd like.
 - Do NOT add items marked [OUT OF STOCK].
 - Only use ids that appear above. Never invent an id. If nothing matches, use "cart": [].
 
@@ -140,7 +176,8 @@ Rules for "reply":
       if (!Number.isFinite(qty) || qty <= 0) qty = 1;
       qty = Math.round(qty * 100) / 100; // cap at 2 decimals
       seen.add(id);
-      cart.push({ ...d, qty });
+      const variant = dishVariants(d).find((v) => variantMatches(v, it?.variant)) || null;
+      cart.push({ ...d, qty, variant });
     }
     if (!reply) reply = cart.length ? "Hazırdır — səbətə əlavə edə bilərsiniz." : "Sizə necə kömək edə bilərəm?";
 
