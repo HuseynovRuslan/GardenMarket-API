@@ -21,8 +21,9 @@ router.get('/dishes', (req, res) => {
   if (category_id) { where += ' AND category_id = ?'; params.push(category_id); }
   if (featured === '1') { where += ' AND is_featured = 1'; }
   if (search) {
-    where += ' AND (name LIKE ? OR description LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`);
+    // sizes too, so a variety name ("Nanəli") finds the oil that offers it
+    where += ' AND (name LIKE ? OR description LIKE ? OR sizes LIKE ?)';
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
   }
 
   const total = db.prepare(`SELECT COUNT(*) AS c FROM dishes WHERE ${where}`).get(...params).c;
